@@ -1,0 +1,1086 @@
+#!/bin/bash
+#########################################################
+#							#
+#		SNMP Printer Check			#
+#							#
+# check_snmp_printer					#
+# 	Version 4.0 (June 9th, 2016)			#
+#							#
+# Authored by Jason Leonard				#
+# 	E-mail: jason_leonard@yahoo.com			#
+#							#
+# Overview						#
+# ----------------------------------------------------- #
+# This plugin is a rewrite of the SNMP printer check	#
+# provided by Monitoring Solutions. In operating the	#
+# plugin at our environment, I noticed the output was	#
+# combined as one long paragraph when using the CONSUM	#
+# ALL option (definitely a favorite of mine).		#
+# While this is in accordance with Nagios plugin dev.	#
+# guidelines, for devices with numerous consumables 	#
+# (like copiers), this makes it difficult to quickly	#
+# find the empty consumable when an alert came in. So I #
+# set out to spruce up the output of the plugin - using #
+# one consumable per line.				#
+#							#
+# In the process, I also realized the original plugin	#
+# was more if/then statements than I had seen since my	#
+# programming class in college. So I made the code a	#
+# bit cleaner for faster execution. I also had to add	#
+# SNMP pre-flight checks, as the original would return	#
+# OK status to Nagios even if SNMP was broken. 		#
+#							#
+# Lastly, I decided to rewrite the options and add 	#
+# other pre-flight checks that are present in my other	#
+# plugins. I like to be thorough in making sure the	#
+# program won't return output if the input is just 	#
+# garbage!						#
+#							#
+# NOTE:							#
+# Because CONSUM ALL uses a multi-line output, you will	#
+# need to use the $LONGSERVICEOUTPUT$ macro in your	#
+# service notification commands!			#
+#							#
+# This plugin is distributed under the GNU GPL license.	#
+# You may re-destribute only according to the terms of 	#
+# the GNU GPL v2.					#
+#							#
+#########################################################
+
+#########################################################
+##		     GLOBAL VARIABLES 		       ##
+#########################################################
+APPNAME=$(basename $0)
+AUTHOR="Jason Leonard"
+VERSION="4.0"
+
+# Default settings for connection
+COMMUNITY='public'
+HOST_NAME='localhost'
+SNMPVERSION='2c'
+
+# State Variables
+STATE_OK=0
+STATE_WARN=1
+STATE_CRIT=2
+STATE_UNK=3
+
+# Default Outputs
+STATE=$STATE_OK
+STATE_STRING=""
+PERFDATA=""
+
+STRING_TYPE=""
+CHECK=""
+PARAMETER=""
+
+# Set a warning at 20% of consumable, if not passed
+WARNING=20
+
+# Set a critical at 5% of consumable, if not passed. The standard of 10 
+# seems to be high for most consumables, which move very slowly.
+CRITICAL=5
+
+# Change this to modify the script's handling of how it separates
+# each consumable/tray when multiple checks are output.
+# SEPARATOR="\n"
+SEPARATOR=","
+
+# This is the character that tokenizes multiple arguments
+# to the TRAY and CONSUM checks. I have this here
+# so it's easy to change if I find the current character
+# I have is buggy or a bad choice
+ARG_TOKEN=","
+
+#########################################################
+#		Universal SNMP OIDS 			#
+#########################################################
+OID_hrDeviceDescr="1.3.6.1.2.1.25.3.2.1.3"
+OID_hrDeviceIndex="1.3.6.1.2.1.25.3.2.1.1"
+OID_hrDeviceStatus="1.3.6.1.2.1.25.3.2.1.5"
+OID_hrPrinterStatus="1.3.6.1.2.1.25.3.5.1.1.1"
+OID_prtAlertDescription="1.3.6.1.2.1.43.18.1.1.8"
+OID_prtConsoleDisplayBufferText="1.3.6.1.2.1.43.16.5.1.2.1"
+OID_prtGeneralSerialNumber="1.3.6.1.2.1.43.5.1.1.17"
+OID_prtInputCurrentLevel="1.3.6.1.2.1.43.8.2.1.10.1"
+OID_prtInputDimUnit="1.3.6.1.2.1.43.8.2.1.3.1"
+OID_prtInputMaxCapacity="1.3.6.1.2.1.43.8.2.1.9.1"
+OID_prtInputMediaDimFeedDirDeclared="1.3.6.1.2.1.43.8.2.1.4.1"
+OID_prtInputMediaDimXFeedDirDeclared="1.3.6.1.2.1.43.8.2.1.5.1"
+OID_prtInputName="1.3.6.1.2.1.43.8.2.1.13.1"
+OID_prtMarkerColorantValue="1.3.6.1.2.1.43.12.1.1.4.1"
+OID_prtMarkerLifeCount="1.3.6.1.2.1.43.10.2.1.4.1.1"
+OID_prtMarkerSuppliesDescription="1.3.6.1.2.1.43.11.1.1.6.1"
+OID_prtMarkerSuppliesLevel="1.3.6.1.2.1.43.11.1.1.9.1"
+OID_prtMarkerSuppliesMaxCapacity="1.3.6.1.2.1.43.11.1.1.8.1"
+
+#########################################################
+#			print_version			#
+#########################################################
+print_version() {
+
+    echo "$APPNAME $VERSION"
+	echo "$AUTHOR"
+	echo ""
+	
+}
+
+#########################################################
+#			print_usage			#
+#########################################################
+print_usage(){
+
+	echo ''
+	echo "Usage for SNMP v1/2c:"
+	echo "	$APPNAME -H <host/IP> -t <type of check> [-C <SNMP community>] [-S <character>] [-w <warning value>] [-c <critical value>]"
+	echo ""
+	echo "Usage for SNMP v3:"
+	echo "	$APPNAME -H <host/IP> -t <type of check> -u <user> -x <protocol> -X <password> -a <protocol> -A <password> -l <security mode> [-S <character>] [-w <warning value>] [-c <critical value>]"
+	echo ''
+	
+}
+
+#########################################################
+##		    print_help Function		       ##
+#########################################################
+# Prints out user help and gives examples of proper	#
+# plugin usage						#
+#########################################################
+function print_help {
+
+	print_version
+	echo 'Description:'
+	echo "$APPNAME is a Nagios plugin to check the status of various components of networked printers."
+	echo ''
+	echo 'This plugin is not developped by the Nagios Plugin group.'
+	echo 'Please do not e-mail them for support on this plugin.'
+	echo ''
+	echo 'For contact info, please read the plugin script file.'
+	print_usage
+	echo '---------------------------------------------------------------------'
+	echo ''
+	echo 'OPTIONS:'
+	echo '	-H|--host'
+	echo '		Host name or IP address to check. Default is: localhost. REQUIRED OPTION'
+	echo '	-v|--snmpversion { 1 | 2c | 3 }'
+	echo "		Specifies the SNMP version to use. Default is '2c'. REQUIRED OPTION"
+	echo '	-C|--community'
+	echo "		SNMP v2 community string with Read access. Default is 'public'. REQUIRED OPTION"
+	echo '	-u|--user'
+	echo '		SNMP v3 username'
+	echo '	-l|--privlevel { noAuthNoPriv | authNoPriv | authPriv }'
+	echo '		SNMP v3 privilege level'
+	echo '	-x|--privprotocol { DES | AES }'
+	echo '		SNMP v3 privacy protocol'
+	echo '	-X|--privpassword'
+	echo '		SNMP v3 privacy password'
+	echo '	-a|--authprotocol { MD5 | SHA }'	
+	echo '		SNMP v3 authentication protocol'
+	echo '	-A|--authpassword'
+	echo '		SNMP v3 authentication password'
+	echo '	-t|--type { consum | consumx | display | devices | messages | model | pagecount | status | tray }'
+	echo '		The check you want to perform for the printer.'
+	echo '		REQUIRED OPTION'  
+	echo '	-w|--warning'
+	echo '		Assign WARNING value, in %, for capacity checks'
+	echo '	-c|--critical'
+	echo '		Assign CRITICAL value, in %, for capacity checks'
+	echo '	-S|--separator <text string>'
+	echo '		Assign a particular string as the separator for consumables.'
+	echo '		Default is , to conform to Nagios plugin development guidelines'
+	echo '	 -h|--help'
+	echo '		Show this help screen'
+	echo '	 -V|--version'
+	echo '		Show the current version of the plugin'
+	echo ''
+	echo 'CHECK TYPES:'
+	echo ''
+	echo '	CONSUM { <string> | TEST | ALL }'
+	echo '		<string> will give you all consumables matching the string'
+	echo "			For example, 'CONSUM Toner' will only show toner levels"
+	echo '		TEST will give you the exact names of available consumables'
+	echo '		ALL will give you all consumable output at once.'
+	echo ''
+	echo '	CONSUMX <string>'
+	echo '		This gives you results only for the ***EXACT*** consumable specified by <string>'
+	echo "			For example, 'CONSUMX \"Black Toner Cartridge\" "
+	echo '			will only give you the usage for a consumable named "Black Toner Cartridge". '
+	echo '			It will not give you results for "Black Toner Cartridge 1" or "Black Toner". '
+	echo '	DISPLAY'
+	echo '		Report contents of printer display'
+	echo ''
+	echo '	DEVICES'
+	echo '		Status of hardware modules'
+	echo ''
+	echo '	MESSAGES'
+	echo '		Event logs reported by the printer'
+	echo ''
+	echo '	MODEL'
+	echo '		ALL will give you all tray output at once.'
+	echo ''
+	echo '	PAGECOUNT'
+	echo '		How many pages this printer has processed (culmulative)'
+	echo ''
+	echo '	STATUS'
+	echo '		Overall status of the printer'
+	echo ''
+	echo '	TRAY { <number> | TEST | ALL }'
+	echo '		<number> will give you output for the specified tray. A comma-separated list of values is possible as well.'
+	echo "		TEST will give you the #'s of all trays available "
+	echo '		ALL will give you all tray output at once.'
+	echo ''
+	echo 'Examples:'
+	echo "	$APPNAME -H 10.0.1.10 -C public -t \"CONSUM ALL\" -w 25 -c 10 "
+	echo "	$APPNAME -H 10.0.1.10 -C public -t \"CONSUMX Punch Dust Box\" "
+	echo "	$APPNAME -H 10.0.1.10 -C public -t MODEL "
+	echo "	$APPNAME -H 10.0.1.10 -C public -t \"TRAY 2,3\" "
+	echo "	$APPNAME -V"
+	echo ''
+
+	exit $STATE_UNK
+	
+}
+
+#########################################################
+##		   CheckModel function		       ##
+#########################################################
+# Returns printer model and serial. Always returns OK 	#
+#########################################################
+function CheckModel(){
+
+	MODEL=`walk_snmp $OID_hrDeviceDescr.1 true`
+	check_snmp_error "$?" "$MODEL"
+
+	SERIAL=`walk_snmp $OID_prtGeneralSerialNumber true`
+	check_snmp_error "$?" "$SERIAL"
+	
+	STATE_STRING="$MODEL, Serial # $SERIAL"
+	
+	return $STATE_OK
+	
+}
+
+#########################################################
+##		  CheckMessages function	       ##
+#########################################################
+# Shows messages on the printer display. The OID is not #
+# commonly used in all printers				#
+#########################################################
+function CheckMessages(){
+
+	MESSAGES=`walk_snmp $OID_prtAlertDescription true`
+	check_snmp_error "$?" "$MESSAGES"
+
+	if [ -z "$MESSAGES" ]; then
+		STATE_STRING="UNKNOWN: Can't determine messages. Device does not support this OID."
+		STATE=$STATE_UNK
+	else
+		MESSAGES=$(echo "$MESSAGES" | tr "\n" "\!")
+		STATE_STRING="$MESSAGES"
+	fi
+	
+	return $STATE
+	
+}
+
+#########################################################
+##		 CheckPageCount function	       ##
+#########################################################
+# Returns pretty-formatted page count for the printer.	#
+# Awesome for tracking historical page usage.		#
+#########################################################
+function CheckPageCount(){
+
+	PAGE_COUNT=`walk_snmp $OID_prtMarkerLifeCount true`
+	check_snmp_error "$?" "$PAGE_COUNT"
+	
+	PERFDATA="'Pages'=$PAGE_COUNT"
+	PAGE_COUNT=$(echo $PAGE_COUNT | sed -e :x -e 's/\([0-9][0-9]*\)\([0-9][0-9][0-9]\)/\1,\2/' -e 'tx')
+	STATE_STRING="Pagecount is $PAGE_COUNT."
+	return $STATE
+	
+}
+
+#########################################################
+## 		  CheckDisplay function 	       ##
+#########################################################
+function CheckDisplay(){
+
+	DISPLAY=`walk_snmp $OID_prtConsoleDisplayBufferText true`
+	check_snmp_error "$?" "$DISPLAY"
+
+	# if display is null, we need to let the user know
+	if [ $? -eq 0 ]; then
+		# Let's make sure we eliminate any extra new lines, or at least replace them with our
+		#	specified SEPARATOR (which could be a new line)
+		STATE_STRING=$(echo "$DISPLAY" | tr "\n" "$SEPARATOR")
+		return $STATE_OK
+	else
+		# Something happened or this OID isn't available
+		STATE_STRING="UNKNOWN - printer does not appear to support using this OID."
+		return $STATE_UNK
+	fi
+
+}
+
+#########################################################
+##	        CheckPrinterStatus function 	       ##
+#########################################################
+function CheckPrinterStatus(){
+
+	STATUS_STATE=$STATE_OK
+	PRINTER_STATUS=`walk_snmp $OID_hrPrinterStatus true`
+	check_snmp_error "$?" "$PRINTER_STATUS"
+	
+	case "$PRINTER_STATUS" in
+		1|"other"|"other(1)")
+			STATE_STRING="CRITICAL: Printer status = $PRINTER_STATUS."
+			STATUS_STATE=$STATE_CRIT
+		;;
+		3|"idle"|"idle(3)")
+			STATE_STRING="OK: Printer status = $PRINTER_STATUS."
+		;;
+		4|"printing"|"printing(4)")
+			STATE_STRING="OK: Printer status = $PRINTER_STATUS."
+		;;
+		5|"warmup"|"warmup(5)")
+			STATE_STRING="OK: Printer status = $PRINTER_STATUS."
+		;;
+		*)
+			STATE_STRING="WARNING: Printer status = $PRINTER_STATUS."
+			STATUS_STATE=$STATE_WARN
+		;;
+	esac
+	
+	return $STATUS_STATE
+	
+}
+
+#########################################################
+## 		CheckDeviceStatus function 	       ##
+#########################################################
+function CheckDeviceStatus(){
+
+	CURRENT_STATE=$STATE_OK
+	CURRENT_STATUS=0
+	DEVICE_STATUS=""
+	DEVICE_NAME=""
+	DEVICE_IDS=`walk_snmp $OID_hrDeviceIndex true`
+	check_snmp_error "$?" "$DEVICE_IDS"
+	
+	for ID in $DEVICE_IDS
+	do
+		DEVICE_NAME=`walk_snmp $OID_hrDeviceDescr.$ID true`
+		check_snmp_error "$?" "$DEVICE_NAME"
+		
+		STATE_STRING="$STATE_STRING$DEVICE_NAME status is "
+		
+		DEVICE_STATUS=`walk_snmp $OID_hrDeviceStatus.$ID true`
+		check_snmp_error "$?" "$DEVICE_STATUS"
+
+		case "$DEVICE_STATUS" in
+			"unknown(1)")
+				STATE_STRING="$STATE_STRING$DEVICE_STATUS - WARNING!$SEPARATOR"
+				CURRENT_STATUS=$STATE_WARN
+			;;
+			"running(2)")
+				STATE_STRING="$STATE_STRING$DEVICE_STATUS - OK!$SEPARATOR"
+			;;
+			"warning(3)")
+				STATE_STRING="$STATE_STRING$DEVICE_STATUS - WARNING!$SEPARATOR"
+				CURRENT_STATUS=$STATE_WARN
+			;;
+			"testing(4)")
+				STATE_STRING="$STATE_STRING$DEVICE_STATUS - OK!$SEPARATOR"
+			;;
+			"down(5)")
+				STATE_STRING="$STATE_STRING$DEVICE_STATUS - CRITICAL!$SEPARATOR"
+				CURRENT_STATUS=$STATE_CRIT
+			;;
+			*)
+				STATE_STRING="$STATE_STRING$DEVICE_STATUS - WARNING!$SEPARATOR"
+				CURRENT_STATUS=$STATE_WARN
+			;;
+		esac
+		
+		if [ "$CURRENT_STATUS" -gt "$CURRENT_STATE" ]; then
+			CURRENT_STATE="$CURRENT_STATUS"
+		fi
+
+	done
+	
+	return $CURRENT_STATE
+
+} 
+
+#########################################################
+##	      CheckOneConsumable function	       ##
+#########################################################
+# Given the marker's ID (1, 2, 3, etc.), this function	#
+# grabs the consmable string for that ID, converts it 	#
+# to a name and determines capacity and status code for	#
+# it.							#
+#							#
+# Only status code is returned. Global string variables #
+# are used for printing and other functionality.	#
+#########################################################
+function CheckOneConsumable () {
+
+	CONSUM_STATE=$STATE_OK
+	CURRENT_CAPACITY=0
+	MAX_CAPACITY=0
+	MARKER_NAME=""
+	MARKER_COLOR=""
+	MARKER_NAME=`walk_snmp $OID_prtMarkerSuppliesDescription.$1 true`
+	check_snmp_error "$?" "$MARKER_NAME"
+	
+	MARKER_NAME=$(echo "$MARKER_NAME" | tr -d ".")
+
+	# Some manufacturers don't put the actual cartridge color in the above OID text for 
+	#	MARKER_STRING. Instead, each entry just says "toner". The OID used here is 
+	#	a place where an associated color string must be stored. We are going to get this 
+	#	info. and use it if not already available in the MARKER_NAME we've parsed.
+	# --- Thanks to Martin Šoltis for letting me know about this problem on some copiers.
+	MARKER_COLOR=`walk_snmp $OID_prtMarkerColorantValue.$1 true`
+	
+	# We're just checking here to see if the consumable already has this color in its text description
+	if [ $(echo "$MARKER_NAME" | grep -vqi "$MARKER_COLOR") ]; then
+		# It doesn't, so we're going to add it
+		MARKER_NAME="$MARKER_COLOR $MARKER_NAME"
+	fi
+
+	# As usual, if the results are an empty set, something went wrong or didn't match up
+	if [ -z "$MARKER_NAME" ]; then 
+		STATE_STRING="UNKNOWN - OID not found! Your printer may not support checking this consumable."
+		STATE_STRING="$STATE_STRING Use the CONSUM TEST option to determine which consumables may be monitored."
+		PERFDATA=""
+		CONSUM_STATE=$STATE_UNK
+	else
+		# Determine capacities for the current marker
+		CURRENT_CAPACITY=`walk_snmp $OID_prtMarkerSuppliesLevel.$1 true`
+		check_snmp_error "$?" "$CURRENT_CAPACITY"
+		
+		MAX_CAPACITY=`walk_snmp $OID_prtMarkerSuppliesMaxCapacity.$1 true`
+		check_snmp_error "$?" "$MAX_CAPACITY"
+		
+		if [ "$MAX_CAPACITY" -lt 0 ]; then
+			MAX_CAPACITY=0
+		fi
+				
+		# the component does not have a measurable status indication
+		case "$CURRENT_CAPACITY" in
+			"-3") # A value of (-3) means that the printer knows that there is some supply/remaining space
+				STATE_STRING="$STATE_STRING$MARKER_NAME is OK!$SEPARATOR"
+			;;
+			"-2") # The value (-2) means unknown
+				STATE_STRING="$MARKER_NAME is at WARNING level!$SEPARATOR$STATE_STRING"
+				if [ "$CONSUM_STATE" -lt 1 ]; then
+					CONSUM_STATE=$STATE_WARN
+				fi
+			;;
+			"0") # Something is empty!
+				STATE_STRING="$MARKER_NAME is at CRITICAL level!$SEPARATOR$STATE_STRING"
+				CONSUM_STATE=$STATE_CRIT
+			;;
+			*) # A positive value means this is a measurable component - let's report it's status code and let user know the % usage
+				let "CURRENT_CAPACITY=$CURRENT_CAPACITY * 100 / $MAX_CAPACITY"
+				if [ "$CURRENT_CAPACITY" -gt "$WARNING" ]; then 
+					STATE_STRING="$STATE_STRING$MARKER_NAME is at $CURRENT_CAPACITY% - OK!$SEPARATOR"
+				else 
+					if [ "$CURRENT_CAPACITY" -le "$WARNING" ] && [ "$CURRENT_CAPACITY" -gt "$CRITICAL" ]; then
+						STATE_STRING="$MARKER_NAME is at $CURRENT_CAPACITY% - WARNING!$SEPARATOR$STATE_STRING"
+						if [ "$CONSUM_STATE" -lt 1 ]; then
+							CONSUM_STATE=$STATE_WARN
+						fi
+					else 
+						if [ "$CURRENT_CAPACITY" -le "$CRITICAL" ]; then
+							STATE_STRING="$MARKER_NAME is at $CURRENT_CAPACITY% - CRITICAL!$SEPARATOR$STATE_STRING"
+							CONSUM_STATE=$STATE_CRIT
+						fi
+					fi
+				fi						
+			;;
+		esac	
+		
+		PERFDATA="$PERFDATA '$MARKER_NAME'=$CURRENT_CAPACITY;$WARNING;$CRITICAL"
+		
+	fi
+	
+	return $CONSUM_STATE
+
+}
+
+#########################################################
+##	      CheckExactConsumable function	       ##
+#########################################################
+# Loops through all consumables and compares the string #
+# passed to the consumable string. If a match is found, #
+# we calculate and output capacity and status. If a	#
+# match is not found, let the user know.		#
+#							#
+# Global string variables are used for printing status 	#
+# and perf data.					#
+#########################################################
+function CheckExactConsumable(){
+
+	CONSUMX_STATE=$STATE_OK
+	FOUND=false
+	FOUND_MARKER=0
+	ALL_MARKERS=`walk_snmp $OID_prtMarkerSuppliesDescription true`
+	ALL_MARKERS=$(echo "$ALL_MARKERS" | tr -d ".")
+	check_snmp_error "$?" "$ALL_MARKERS"
+
+	# Now we can loop through everything that matched
+	COUNT=1
+	NUM_MARKERS=$(echo "$ALL_MARKERS" | wc -l)
+	while [[ $COUNT -le $NUM_MARKERS ]]
+	do
+		MARKER_NAME=$(echo "$ALL_MARKERS" | awk NR==$COUNT)
+		
+		# Update our boolean if we find a match!
+		if [ "$1" == "$MARKER_NAME" ]; then
+			FOUND=true
+			FOUND_MARKER="$COUNT"
+		fi
+
+		COUNT=$[ $COUNT+1 ];
+
+	done
+
+	if $FOUND; then
+		# Determine capacities for the marker of the matching consumable
+		X_CURRENT_CAPACITY=`walk_snmp $OID_prtMarkerSuppliesLevel.$FOUND_MARKER true`
+		check_snmp_error "$?" "$X_CURRENT_CAPACITY"
+
+		MAX_CAPACITY=`walk_snmp $OID_prtMarkerSuppliesMaxCapacity.$FOUND_MARKER true`
+		check_snmp_error "$?" "$MAX_CAPACITY"
+
+		if [[ "$MAX_CAPACITY" -lt 0 ]]; then
+			MAX_CAPACITY=0
+		fi
+		
+		# the component does not have a measurable status indication
+		case "$X_CURRENT_CAPACITY" in
+			"-3") # A value of (-3) means that the printer knows that there is some supply/remaining space
+				STATE_STRING="$STATE_STRING$1 is OK!"
+			;;
+			"-2") # The value (-2) means unknown
+				STATE_STRING="$1 is at WARNING level!$SEPARATOR$STATE_STRING"
+				if [[ "$CONSUMX_STATE" -lt 1 ]]; then
+					CONSUMX_STATE=$STATE_WARN
+				fi
+			;;
+			"0") # Something is empty!
+				STATE_STRING="$1 is at CRITICAL level!$SEPARATOR$STATE_STRING"
+				CONSUMX_STATE=$STATE_CRIT
+			;;
+			*) # A positive value means this is a measurable component - let's report it's status code and let user know the % usage
+				let "X_CURRENT_CAPACITY=$X_CURRENT_CAPACITY * 100 / $MAX_CAPACITY"
+				if [[ "$X_CURRENT_CAPACITY" -gt "$WARNING" ]]; then 
+					STATE_STRING="$STATE_STRING$1 is at $X_CURRENT_CAPACITY% - OK!$SEPARATOR"
+				else 
+					if [[ "$X_CURRENT_CAPACITY" -le "$WARNING" ]] && [[ "$X_CURRENT_CAPACITY" -gt "$CRITICAL" ]]; then
+						STATE_STRING="$1 is at $X_CURRENT_CAPACITY% - WARNING!$SEPARATOR$STATE_STRING"
+						if [[ "$CONSUMX_STATE" -lt 1 ]]; then
+							CONSUMX_STATE=$STATE_WARN
+						fi
+					else 
+						if [[ "$X_CURRENT_CAPACITY" -le "$CRITICAL" ]]; then
+							STATE_STRING="$1 is at $X_CURRENT_CAPACITY% - CRITICAL!$SEPARATOR$STATE_STRING"
+							CONSUMX_STATE=$STATE_CRIT
+						fi
+					fi
+				fi						
+			;;
+		esac
+		PERFDATA="$PERFDATA '$1'=$X_CURRENT_CAPACITY;$WARNING;$CRITICAL"
+	else
+		# Let the user know we didn't find anything, and report back the string they sent. Also prompt them to run the TEST option to double-check their string
+		STATE_STRING="UNKNOWN - No match found for '$1'! Use the CONSUM TEST option to determine which consumables may be monitored."
+		CONSUMX_STATE=$STATE_UNK
+	fi
+		
+	return $CONSUMX_STATE
+
+}
+
+#########################################################
+##		CheckConsumables function	       ##
+#########################################################
+# Determines which consumables to check and then pass 	#
+# them all off to CheckOneConsumable			#
+#							#
+# Global string variables are used for printing status 	#
+# and perf data.					#
+#########################################################
+function CheckConsumables(){
+
+	CONSUMS_STATE=$STATE_OK
+	HEX_ID=0
+	CURRENT_STATUS=0
+	HEX_MARKER=""
+	ASCII_MARKER=""
+	MARKERS_MATCHED=""
+	
+	case "$1" in
+		"test"|"TEST")	# User passed "TEST" parameter - output what consumables are available
+			ALL_MARKERS=`walk_snmp $OID_prtMarkerSuppliesDescription true`
+			check_snmp_error "$?" "$ALL_MARKERS"
+			
+			echo "Consumables you may monitor:"
+			STATE_STRING="$ALL_MARKERS"
+			CONSUMS_STATE=$STATE_UNK
+		;;
+		"all"|"ALL") # User passed ALL parameter - check everything!
+			ALL_MARKERS=`walk_snmp $OID_prtMarkerSuppliesDescription true`
+			check_snmp_error "$?" "$ALL_MARKERS"
+			
+			# Let's loop through all consumables available
+			#--- We can do this differently with my current "REWRITE"
+			COUNT=1
+			NUM_MARKERS=$(echo "$ALL_MARKERS" | wc -l)
+			while [[ $COUNT -le $NUM_MARKERS ]]; do
+				CheckOneConsumable $COUNT
+				CURRENT_STATUS=$?
+				
+				if [ "$CURRENT_STATUS" -gt "$CONSUMS_STATE" ]; then
+					CONSUMS_STATE="$CURRENT_STATUS"
+				fi
+				
+				COUNT=$[ $COUNT+1 ];
+			done
+		;;
+		*) # A string was passed, on which we will match to available consumable strings
+			ALL_MARKERS=`walk_snmp $OID_prtMarkerSuppliesDescription false`
+			check_snmp_error "$?" "$ALL_MARKERS"
+			
+			MARKERS_MATCHED=$(echo "$ALL_MARKERS" | egrep -i "$1")
+
+			if [ -z "$MARKERS_MATCHED" ]; then
+				STATE_STRING="UNKNOWN - OID not found! Your printer may not support checking this consumable."
+				STATE_STRING="$STATE_STRING Use the CONSUM TEST option to determine which consumables may be monitored."
+				PERFDATA=""
+				CONSUMS_STATE=$STATE_UNK
+			else
+				# Now we can loop through everything that matched
+				for MARKER_ID in $(echo "$MARKERS_MATCHED" | awk -F. '{print $8}' | awk -F= '{print $1}') 
+				do
+					CheckOneConsumable $MARKER_ID
+					CURRENT_STATUS=$?
+					
+					if [ "$CURRENT_STATUS" -gt "$CONSUMS_STATE" ]; then
+						CONSUMS_STATE="$CURRENT_STATUS"
+					fi
+
+				done
+			fi
+		;;
+	esac
+	
+	return $CONSUMS_STATE
+
+}
+
+#########################################################
+##		  CheckOneTray Function	       	       ##
+#########################################################
+# Checks the tray #, as passed by parameter. If found,	#
+# it returns the status and capacity. 			#
+#							#
+# Only status code is returned. Global string variables #
+# are used for printing and other functionality.	#
+#########################################################
+function CheckOneTray (){
+
+	TRAY_STATE=$STATE_OK
+	TRAY_CAPACITY=0
+	TRAY_MAX_CAPACITY=0
+	TRAY_FEED_DIMENSION=0
+	TRAY_XFEED_DIMENSION=0
+	TRAY_DIMENSION_UNITS=0
+	
+	TRAY_CAPACITY=`walk_snmp $OID_prtInputCurrentLevel.$1 true`
+	check_snmp_error "$?" "$TRAY_CAPACITY"
+	
+	if [ -z "$TRAY_CAPACITY" ]; then
+		STATE_STRING="$STATE_STRING UNKNOWN - Tray $1 not found. Use the TRAY TEST option to determine which trays may be monitored."
+		TRAY_STATE=$STATE_UNK
+	else
+		# Determine information about the tray
+		TRAY_NAME=`walk_snmp $OID_prtInputName.$1 true`
+		check_snmp_error "$?" "$TRAY_NAME"
+		
+		# Some manufacturers do not set the tray name OID, so we'll assume a generic name depending on the # passed to the function
+		if [ "$TRAY_NAME"=="" ]; then
+			TRAY_NAME="Tray $1"
+		fi
+		
+		case "$TRAY_CAPACITY" in
+			"-3") # The value (-3) means that the printer knows that at least one unit remains.
+				STATE_STRING="$STATE_STRING$TRAY_NAME is OK!$SEPARATOR"
+			;;
+			"-2") # The value (-2) means unknown
+				STATE_STRING="$STATE_STRING$TRAY_NAME status is UNKNOWN!$SEPARATOR"
+				TRAY_STATE=$STATE_UNK
+			;;
+			"0") # 0 means there is no paper left! This is our only critical value.
+				# Determine paper size of current tray
+				TRAY_FEED_DIMENSION=`walk_snmp $OID_prtInputMediaDimFeedDirDeclared.$1 true`
+				TRAY_XFEED_DIMENSION=`walk_snmp $OID_prtInputMediaDimXFeedDirDeclared.$1 true`
+				TRAY_DIMENSION_UNITS=`walk_snmp $OID_prtInputDimUnit.$1 true`
+
+				if [ "$TRAY_FEED_DIMENSION" -lt 0 ] && [ "$TRAY_XFEED_DIMENSION" -lt 0 ]; then
+					# If either dimension was negative, then we really don't know much about the dimension
+					TRAY_DIMENSION_STRING="paper."
+				else
+			
+					case "$TRAY_DIMENSION_UNITS" in
+						"3") # convert ten thousandths of an inch to inches
+						TRAY_FEED_DIMENSION=$(echo "scale=1;$TRAY_FEED_DIMENSION/10000" | bc)
+						TRAY_XFEED_DIMENSION=$(echo "scale=1;$TRAY_XFEED_DIMENSION/10000" | bc)
+						;;
+						"4") # convert micrometers to inches, and get the int portion
+						TRAY_FEED_DIMENSION=$(echo "scale=1;$TRAY_FEED_DIMENSION*0.0000393700787" | bc)
+						TRAY_FEED_DIMENSION=$(echo "scale=1;$TRAY_FEED_DIMENSION+0.5" | bc)
+						TRAY_FEED_DIMENSION=$(echo "scale=1;$TRAY_FEED_DIMENSION/1" | bc)
+
+						TRAY_XFEED_DIMENSION=$(echo "scale=1;$TRAY_XFEED_DIMENSION*0.0000393700787" | bc)
+						TRAY_XFEED_DIMENSION=$(echo "scale=1;$TRAY_XFEED_DIMENSION+0.5" | bc)
+						TRAY_XFEED_DIMENSION=$(echo "scale=1;$TRAY_XFEED_DIMENSION/1" | bc)
+						;;
+					esac
+
+					TRAY_DIMENSION_STRING="$TRAY_XFEED_DIMENSION x $TRAY_FEED_DIMENSION paper."
+				fi
+
+				STATE_STRING="$STATE_STRING$TRAY_NAME is at CRITICAL level - please refill with more $TRAY_DIMENSION_STRING$SEPARATOR"
+				TRAY_STATE=$STATE_CRIT
+			;;
+			*) # A positive number indicates how many pages are left. We'll calculate what % of capacity this is and determine status
+				TRAY_MAX_CAPACITY=`walk_snmp $OID_prtInputMaxCapacity.$1 true`
+				check_snmp_error "$?" "$TRAY_MAX_CAPACITY"
+				
+				let "TRAY_CAPACITY = $TRAY_CAPACITY * 100 / $TRAY_MAX_CAPACITY"
+				if [ "$TRAY_CAPACITY" -gt "$CRITICAL" ]; then
+					STATE_STRING="$STATE_STRING$TRAY_NAME is at $TRAY_CAPACITY%% - OK!$SEPARATOR"
+				else
+					if [ "$TRAY_CAPACITY" -le "$WARNING" ]; then
+						# Determine paper size of current tray
+						TRAY_FEED_DIMENSION=`walk_snmp $OID_prtInputMediaDimFeedDirDeclared.$1 true`
+						check_snmp_error "$?" "$TRAY_FEED_DIMENSION"
+						
+						TRAY_XFEED_DIMENSION=`walk_snmp $OID_prtInputMediaDimXFeedDirDeclared.$1 true`
+						check_snmp_error "$?" "$TRAY_XFEED_DIMENSION"
+						
+						TRAY_DIMENSION_UNITS=`walk_snmp $OID_prtInputDimUnit.$1 true`
+						check_snmp_error "$?" "$TRAY_DIMENSION_UNITS"
+						
+						if [ "$TRAY_FEED_DIMENSION" -lt 0 ] && [ "$TRAY_XFEED_DIMENSION" -lt 0 ]; then
+							# If either dimension was negative, then we really don't know much about the dimension
+							TRAY_DIMENSION_STRING="paper."
+						else
+							case "$TRAY_DIMENSION_UNITS" in
+								"3") # convert ten thousandths of an inch to inches
+								TRAY_FEED_DIMENSION=$(echo "scale=1;$TRAY_FEED_DIMENSION/10000" | bc)
+								TRAY_XFEED_DIMENSION=$(echo "scale=1;$TRAY_XFEED_DIMENSION/10000" | bc)
+								;;
+								"4") # convert micrometers to inches, and get the int portion
+								TRAY_FEED_DIMENSION=$(echo "scale=1;$TRAY_FEED_DIMENSION*0.0000393700787" | bc)
+								TRAY_FEED_DIMENSION=$(echo "scale=1;$TRAY_FEED_DIMENSION+0.5" | bc)
+								TRAY_FEED_DIMENSION=$(echo "scale=1;$TRAY_FEED_DIMENSION/1" | bc)
+
+								TRAY_XFEED_DIMENSION=$(echo "scale=1;$TRAY_XFEED_DIMENSION*0.0000393700787" | bc)
+								TRAY_XFEED_DIMENSION=$(echo "scale=1;$TRAY_XFEED_DIMENSION+0.5" | bc)
+								TRAY_XFEED_DIMENSION=$(echo "scale=1;$TRAY_XFEED_DIMENSION/1" | bc)
+								;;
+							esac
+									
+							TRAY_DIMENSION_STRING="$TRAY_XFEED_DIMENSION x $TRAY_FEED_DIMENSION paper."
+						fi
+						
+						if [ "$TRAY_CAPACITY" -le "$CRITICAL" ]; then
+							# we have a critical: we already know the value is less than warning
+							STATE_STRING="$STATE_STRING$TRAY_NAME is at $TRAY_CAPACITY%% - CRITICAL! Please refill with more $TRAY_DIMENSION_STRING$SEPARATOR"
+							TRAY_STATE=$STATE_CRIT
+						else
+							# we are only below warning, but not yet below critical
+							STATE_STRING="$STATE_STRING$TRAY_NAME is at $TRAY_CAPACITY%% - WARNING! Please refill with more $TRAY_DIMENSION_STRING$SEPARATOR"
+							if [ "$TRAY_STATE" -lt 1 ]; then
+								TRAY_STATE=$STATE_WARN
+							fi
+						fi
+					fi
+				fi
+				
+				PERFDATA="$PERFDATA '$TRAY_NAME'=$TRAY_CAPACITY;$WARNING;$CRITICAL"
+			;;
+		esac
+		
+	fi
+
+	return $TRAY_STATE
+
+}
+
+#########################################################
+##		CheckPaperTrays Function	       ##
+#########################################################
+# Determines which trays to check and passes each check	#
+# off to CheckOneTray.					#
+#							#
+# Global string variables are used for printing status 	#
+# and perf data.					#
+#########################################################
+function CheckPaperTrays (){
+
+	TRAYS_STATE=$STATE_OK
+	ALL_TRAYS=`walk_snmp $OID_prtInputName true`
+	check_snmp_error "$?" "$ALL_TRAYS"
+	
+	ALL_TRAYS=$(echo "$ALL_TRAYS" | awk -F" " '{print $2}')
+	CURRENT_TRAY_STATUS=0
+	
+	case "$1" in
+		"test"|"TEST")
+			echo "Trays you may monitor:"
+			echo "$ALL_TRAYS"
+			TRAYS_STATE=$STATE_UNK
+		;;
+		"all"|"ALL") # let's check all trays!
+			COUNT=1
+			NUM_TRAYS=$(echo "$ALL_TRAYS" | wc -l)
+			while [[ $COUNT -le $NUM_TRAYS ]]
+			do
+				CheckOneTray "$COUNT"
+				CURRENT_TRAY_STATUS=$?
+				
+				if [ "$CURRENT_TRAY_STATUS" -gt "$TRAYS_STATE" ]; then
+					TRAYS_STATE="$CURRENT_TRAY_STATUS"
+				fi
+				
+				COUNT=$[ $COUNT+1 ];				
+			done
+		;;
+		*) 
+			for TRAY_ID in $(echo "$1" | tr "$ARG_TOKEN" "\n")
+			do
+				CheckOneTray "$TRAY_ID"
+				CURRENT_TRAY_STATUS=$?
+				
+				if [ "$CURRENT_TRAY_STATUS" -gt "$TRAYS_STATE" ]; then
+					TRAYS_STATE="$CURRENT_TRAY_STATUS"
+				fi
+			done
+		;;
+	esac
+	
+	return $TRAYS_STATE
+	
+}
+
+#########################################################
+#		Subroutine: walk_snmp			#
+#########################################################
+walk_snmp(){
+
+	if [ $2 = true ]; then
+		OUTPUT_OPTIONS="-Oavq"
+	else
+		OUTPUT_OPTIONS="-Oa"		 
+	fi
+		
+	if [[ $SNMPVERSION = 3 ]]; then
+		RESULT_TEXT=`snmpwalk -v $SNMPVERSION $OUTPUT_OPTIONS -u $SNMPUSER -l $PRIVILEGELEVEL -x $PRIVACYPROTOCOL -X $PRIVACYPASSWORD -a $AUTHPROTOCOL -A $AUTHPASSWORD $HOST_NAME $1`
+		RESULT_CODE=$?
+	else
+		# Check if community was also set
+		RESULT_TEXT=`snmpwalk -v $SNMPVERSION $OUTPUT_OPTIONS -c $COMMUNITY $HOST_NAME $1`
+		RESULT_CODE=$?
+	fi
+
+	if [[ $RESULT_CODE -ne 0 ]]; then
+		echo "Plugin $APPNAME failure - snmpwalk command error."
+		echo "$RESULT_TEXT"
+		exit $STATE_UNK
+	fi
+
+	if [ $2 = true ]; then
+		echo "$RESULT_TEXT" | sed -e 's/^[[:space:]]*//' | tr -d "\""
+	else
+		echo "$RESULT_TEXT" 
+	fi
+	
+}
+
+#########################################################
+#		Subroutine: check_snmp_error			#
+#########################################################
+# Tests errors returned by function operations		#
+#########################################################
+check_snmp_error(){
+
+	 if [[ $1 -ne 0 ]]; then
+		echo $2
+		exit $STATE_UNK
+	fi
+	
+}
+
+#########################################################
+##			MAIN CODE		       ##
+#########################################################
+
+# Check that all required binaries for the script are available
+# 	EXIT with an UNKNOWN status if not
+binaries="snmpwalk cut tr awk sed bc egrep wc"
+
+for required_binary in $binaries; 
+do
+	which $required_binary > /dev/null
+	if [ "$?" != '0' ];then
+		echo "UNKNOWN: $APPNAME: No usable '$required_binary' binary in '$PATH'"
+		exit $STATE_UNK
+	fi
+done
+
+# Check to see if any parameters were passed
+if [[ $# -eq 0 ]]; then
+	print_usage
+	exit $STATE_UNK
+fi
+
+# Parse our options as passed, and make sure things are peachy
+while test -n "$1"; do
+
+	case "$1" in
+		--host|-H)
+			HOST_NAME=$2
+			shift
+			;;
+		--comunity|-C)
+			COMMUNITY=$2
+			shift
+			;;
+		--snmpversion|-v)
+			SNMPVERSION=$2
+			shift
+			;;
+		--user|-u)
+			SNMPUSER=$2
+			shift
+			;;			
+		--privelegelevel|-l)
+			PRIVILEGELEVEL=$2
+			shift
+			;;			
+		--authprotocol|-a)
+			AUTHPROTOCOL=$2
+			shift
+			;;			
+		--authpassword|-A)
+			AUTHPASSWORD=$2
+			shift
+			;;			
+		--privacyprotocol|-x)
+			PRIVACYPROTOCOL=$2
+			shift
+			;;			
+		--privacypassword|-X)
+			PRIVACYPASSWORD=$2
+			shift
+			;;				
+		--type|-t) # Assign check to perform
+			CHECK_TYPE=$(echo "$2" | cut -d " " -f1)
+			PARAMETER=$(echo "$2" | cut -d " " -f2-)
+			shift
+			;;
+		--separator|-S) # Assign separator
+			SEPARATOR="$2"
+			shift
+			;;
+		--warning|-w) # Assign WARNING threshold
+			WARNING=$2
+			shift
+			;;
+		--critical|-c) # Assign CRITICAL threshold
+			CRITICAL=$2
+			shift
+			;;
+		--help|-h)
+			print_help
+			;;
+		--version|-V)
+			print_version
+			exit $STATE
+			;;			
+		  *)
+			echo "Unknown argument: $1"
+			print_usage
+			exit $STATE_UNK
+			;;
+			
+	esac
+	
+	shift
+	
+done
+
+# Make sure all necessary arguments were given; EXIT with an UNKNOWN status if not
+if [ ! -z $CHECK_TYPE ]; then
+	# Determine the check to perform
+	case "$CHECK_TYPE" in
+		"model"|"MODEL") 
+			CheckModel
+			STATE=$?
+			;;
+		"messages"|"MESSAGES") 
+			CheckMessages
+			STATE=$?
+			;;
+		"pages"|"PAGES"|"count"|"COUNT"|"pagecount"|"PAGECOUNT") 
+			CheckPageCount
+			STATE=$?
+			;;
+		"display"|"DISPLAY") 
+			CheckDisplay
+			STATE=$?
+			;;
+		"status"|"STATUS") 
+			CheckPrinterStatus
+			STATE=$?
+			;;
+		"devices"|"DEVICES") 
+			CheckDeviceStatus
+			STATE=$?
+			;;
+		"consum"|"CONSUM") 
+			CheckConsumables "$PARAMETER"
+			STATE=$?
+			;;
+		"consumx"|"CONSUMX") 
+			CheckExactConsumable "$PARAMETER"
+			STATE=$?
+			;;
+		"tray"|"TRAY"|"trays"|"TRAYS") 
+			CheckPaperTrays "$PARAMETER"
+			STATE=$?
+			;;
+		*)
+			STATE_STRING="UNKNOWN: No valid check type specified to -t parameter"
+			STATE=$STATE_UNK
+			;;
+	esac	
+	
+else
+	echo "Command incomplete!"
+	STATE=$STATE_UNK
+fi
+
+# If the program hasn't exited already, then a check was run okay and we can quit.
+if [ "$PERFDATA" == "" ]; then
+	echo "$STATE_STRING"
+else
+	echo "$STATE_STRING|$PERFDATA"
+fi
+
+exit $STATE
