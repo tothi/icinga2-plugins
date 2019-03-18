@@ -890,7 +890,7 @@ walk_snmp(){
 	fi
 		
 	if [[ $SNMPVERSION = 3 ]]; then
-		RESULT_TEXT=`snmpwalk -v $SNMPVERSION $OUTPUT_OPTIONS -u $SNMPUSER -l $PRIVILEGELEVEL -x $PRIVACYPROTOCOL -X $PRIVACYPASSWORD -a $AUTHPROTOCOL -A $AUTHPASSWORD $HOST_NAME $1`
+		RESULT_TEXT=`snmpwalk -v $SNMPVERSION $OUTPUT_OPTIONS -u $SNMPUSER -n $CONTEXT -l $PRIVILEGELEVEL -x $PRIVACYPROTOCOL -X $PRIVACYPASSWORD -a $AUTHPROTOCOL -A $AUTHPASSWORD $HOST_NAME $1`
 		RESULT_CODE=$?
 	else
 		# Check if community was also set
@@ -988,7 +988,11 @@ while test -n "$1"; do
 		--privacypassword|-X)
 			PRIVACYPASSWORD=$2
 			shift
-			;;				
+			;;
+		--context|-n)
+			CONTEXT=$2
+			shift
+			;;
 		--type|-t) # Assign check to perform
 			CHECK_TYPE=$(echo "$2" | cut -d " " -f1)
 			PARAMETER=$(echo "$2" | cut -d " " -f2-)
