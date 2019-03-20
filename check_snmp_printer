@@ -135,7 +135,7 @@ print_usage(){
 	echo "	$APPNAME -H <host/IP> -t <type of check> [-C <SNMP community>] [-S <character>] [-w <warning value>] [-c <critical value>]"
 	echo ""
 	echo "Usage for SNMP v3:"
-	echo "	$APPNAME -H <host/IP> -t <type of check> -u <user> -x <protocol> -X <password> -a <protocol> -A <password> -l <security mode> [-S <character>] [-w <warning value>] [-c <critical value>]"
+	echo "	$APPNAME -H <host/IP> -t <type of check> [-n <context>] -u <user> -x <protocol> -X <password> -a <protocol> -A <password> -l <security mode> [-S <character>] [-w <warning value>] [-c <critical value>]"
 	echo ''
 	
 }
@@ -168,6 +168,8 @@ function print_help {
 	echo "		SNMP v2 community string with Read access. Default is 'public'. REQUIRED OPTION"
 	echo '	-u|--user'
 	echo '		SNMP v3 username'
+	echo '	-n|--context'
+	echo '		SNMP v3 context'
 	echo '	-l|--privlevel { noAuthNoPriv | authNoPriv | authPriv }'
 	echo '		SNMP v3 privilege level'
 	echo '	-x|--privprotocol { DES | AES }'
