@@ -1,0 +1,75 @@
+#!/usr/bin/perl -w
+# This check uses mplayer to dump a videostream, check the size of it
+# and determine if the streaming service is working or not.
+# ...uh ...yeah :-)
+#morten bekkelund 2008
+#forked: istvan toth 2016 (vlc)
+
+use Getopt::Long;
+use File::stat;
+
+my %ERRORS=('OK'=>0,'WARNING'=>1,'CRITICAL'=>2,'UNKNOWN'=>3,'DEPENDENT'=>4);
+
+sub print_usage {
+print "Usage: check_xstream -u <url> -d <dumped stream filename> -t <time in secs to play> -s <expected min size of dumped file>\n";
+print "Example: ./check_xstream -u mms://streamserver/stream -d /tmp/dump -t 30 -s 1533646 \n";
+}
+
+sub help {
+print_usage();
+}
+
+Getopt::Long::Configure ("bundling");
+GetOptions(
+'u:s' => \$url, 'url' => \$url,
+'d:s' => \$dump, 'dump' => \$dump,
+'t:i' => \$time, 'time' => \$time,
+'s:i' => \$expected_size, 'size' => \$expected_size
+);
+
+if(!$url or !$expected_size or !$dump) {
+print_usage();
+exit $ERRORS{"UNKNOWN"};
+}
+
+unlink($dump);
+
+my $childPid;
+eval {
+	local $SIG{ALRM} = sub { die "alarm\n" };
+	alarm $time;
+	if ($childPid = fork()) {
+		wait();
+	} else {
+		# run-time vlc option stopped working for streams since vlc 3.0 (thats why timeout is needed)
+		my $cmd_out = `/usr/bin/timeout "$time" /usr/bin/vlc-wrapper -q -I dummy "$url" --sout '#std{access=file,mux=raw,dst="$dump"}' 2>&1`;
+	}
+	alarm 0;
+};
+if ($@) {
+	die $@ unless $@ eq "alarm\n";
+	#print "timed out\n";
+	kill 2, $childPid;
+	wait;
+}
+
+my $file_size=stat("$dump")->size;
+
+if(!$file_size) {
+print "UNKNOWN: Cannot find dumped stream.\n";
+exit $ERRORS{"UNKNOWN"};
+}
+
+if($file_size < $expected_size) {
+print "CRITICAL: The size of the stream less than the expected size. Streaming doesnt appear to work correctly (or params are bad).\n";
+exit $ERRORS{"CRITICAL"};
+}
+
+if($file_size >= $expected_size) {
+print "OK: The size of the stream is enough. Streaming appears to work correctly.\n";
+exit $ERRORS{"OK"};
+}
+
+print "UNKNOWN: Something really fishy is going on here....\n";
+exit $ERRORS{"UNKNOWN"};
+# end
